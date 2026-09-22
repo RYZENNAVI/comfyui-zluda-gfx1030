@@ -16,6 +16,7 @@ Look up what you are seeing. For most problems `scripts\Check-Environment.ps1` p
 | Access violation while loading a large model | The safetensors mmap path faults under memory pressure | Add `--disable-mmap` to the launch arguments |
 | Out-of-memory part-way through a generation | Async offload or pinned memory | Launch with `--disable-async-offload --disable-pinned-memory` |
 | The first generation hangs for ten minutes or more | Expected. ZLUDA is JIT-compiling kernels | Wait. They are cached in `%LOCALAPPDATA%\ZLUDA\ComputeCache` and later runs are fast |
+| The screen goes black and recovers, event 4101 "display driver stopped responding", sometimes a hard hang | A single GPU kernel ran past the Windows timeout. Long attention kernels do this | Use split attention, for example `--use-quad-cross-attention`. See "Attention kernels and the driver timeout" below |
 | `no kernel image is available for execution` | Unexpected on gfx1030, which ships with kernels. The HIP install is stripped or broken | Reinstall the HIP SDK. Do not go looking for kernel packs; this card does not need them |
 | HIP is installed but behaves as if it is not | Several versions installed with the wrong PATH order, or a user-scope environment variable shadowing the machine scope | See "Several HIP versions side by side" below |
 
@@ -39,9 +40,30 @@ Note that `comfy\customzluda\zluda.py` is a third file. It is not the default, a
 
 Not on the configuration this project was built against. On an RX 6950 XT with ZLUDA 3.9.5, HIP 6.4 and torch 2.7.0+cu118, `torch.backends.cudnn.is_available()` returns true, reports version 9.1.0, and fp16 convolutions run correctly with cuDNN **enabled** at tiny, VAE and UNet sizes alike.
 
+That was re-measured with one operation per process on an otherwise idle machine, after an earlier round of testing had been confounded by other GPU work: 20 convolutions at 320->320 with cuDNN on took 0.019s each and left the driver alone. The driver resets seen during that earlier round came from attention, not convolution.
+
 That is worth knowing, but it does not make the setting yours to choose: ComfyUI-Zluda disables cuDNN on import for every ZLUDA user, so that is how ComfyUI runs regardless. `Test-Setup.ps1` tests the configuration that ships, then reports the cuDNN-enabled result separately as information. If your card fails that informational line, say so in an issue.
 
 Note that `torch\lib` keeps NVIDIA's own `cudnn64_9.dll` and friends. The ZLUDA `cudnn.dll` is not copied over them, the same way `cublasLt.dll` is not.
+
+### Attention kernels and the driver timeout
+
+Windows resets a GPU that has not finished a single kernel within `TdrDelay`, which is **2 seconds** unless someone set it. The reset shows up as event 4101, a black screen that recovers, or an outright hang.
+
+On an RX 6950 XT under ZLUDA, one unsplit fp16 SDPA call over a 4096-token sequence (`1x8x4096x64`) takes about 1.5 seconds. That sits right on the limit, so some calls cross it and the driver resets. Measured by isolating one operation per process, with the machine otherwise idle:
+
+| Operation | Result |
+|---|---|
+| `matmul` 1024x1024 fp16 | fine |
+| `conv2d` 320->320 at 128x128, cuDNN off, 20x | fine |
+| `conv2d` 320->320 at 128x128, **cuDNN on**, 20x | fine, 0.019s per call |
+| **`SDPA` 1x8x4096x64 fp16, 10x** | **driver reset, every time** |
+
+This is why ComfyUI-Zluda setups run a split attention mode such as `--use-quad-cross-attention`: it breaks attention into chunks so no single kernel approaches the timeout. If you see 4101 during generation, that flag is the first thing to check, not the model and not your VRAM.
+
+Raising `TdrDelay` hides the symptom rather than fixing it, and a genuinely hung GPU then takes the whole machine down instead of recovering. Split the attention instead.
+
+`Test-Setup.ps1` keeps its SDPA check deliberately small for the same reason. A self-test that resets your display driver is not a useful self-test.
 
 ### HIP SDK installed, but `bin` has no `amdhip64.dll`
 

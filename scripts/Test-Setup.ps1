@@ -93,7 +93,9 @@ except Exception as e:
     fail.append(("conv2d fp16", e))
     print("conv2d fp16  FAILED:", e)
 
-# attention
+# attention. Keep this small on purpose. A single SDPA call over a long sequence
+# runs for well over a second on this card, and Windows resets the display driver
+# at 2 seconds by default. 1x8x4096x64 reliably triggers that reset; this does not.
 try:
     q = torch.randn(1, 8, 256, 64, device="cuda", dtype=torch.float16)
     torch.nn.functional.scaled_dot_product_attention(q, q, q)
@@ -157,7 +159,11 @@ while ((Get-Date) -lt $deadline) {
     if ($p.HasExited) { $rc = $p.ExitCode; break }
 }
 
-Stop-ProcessTree -Id $p.Id
+# The sentinel is printed immediately before os._exit, so give the process a
+# moment to go on its own. Killing zluda.exe while it is still tearing down a
+# CUDA context can take the display driver with it.
+for ($i = 0; $i -lt 20 -and -not $p.HasExited; $i++) { Start-Sleep -Milliseconds 500 }
+if (-not $p.HasExited) { Stop-ProcessTree -Id $p.Id }
 
 if (Test-Path $log) {
     Get-Content $log -Encoding UTF8 | Where-Object { $_ -notmatch '^__GFX1030_DONE__' } | ForEach-Object { Write-Host $_ }
