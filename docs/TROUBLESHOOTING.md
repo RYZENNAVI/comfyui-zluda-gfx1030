@@ -16,7 +16,7 @@ Look up what you are seeing. For most problems `scripts\Check-Environment.ps1` p
 | Access violation while loading a large model | The safetensors mmap path faults under memory pressure | Add `--disable-mmap` to the launch arguments |
 | Out-of-memory part-way through a generation | Async offload or pinned memory | Launch with `--disable-async-offload --disable-pinned-memory` |
 | The first generation hangs for ten minutes or more | Expected. ZLUDA is JIT-compiling kernels | Wait. They are cached in `%LOCALAPPDATA%\ZLUDA\ComputeCache` and later runs are fast |
-| The screen goes black and recovers, event 4101 "display driver stopped responding", sometimes a hard hang | A single GPU kernel ran past the Windows timeout. Long attention kernels do this | Use split attention, for example `--use-quad-cross-attention`. See "Attention kernels and the driver timeout" below |
+| The screen goes black and recovers, event 4101 "display driver stopped responding", sometimes a hard hang | Something called torch SDPA, which resets the driver on this setup | Use split attention, for example `--use-quad-cross-attention`. See "torch SDPA resets the display driver" below |
 | `no kernel image is available for execution` | Unexpected on gfx1030, which ships with kernels. The HIP install is stripped or broken | Reinstall the HIP SDK. Do not go looking for kernel packs; this card does not need them |
 | HIP is installed but behaves as if it is not | Several versions installed with the wrong PATH order, or a user-scope environment variable shadowing the machine scope | See "Several HIP versions side by side" below |
 
@@ -46,24 +46,30 @@ That is worth knowing, but it does not make the setting yours to choose: ComfyUI
 
 Note that `torch\lib` keeps NVIDIA's own `cudnn64_9.dll` and friends. The ZLUDA `cudnn.dll` is not copied over them, the same way `cublasLt.dll` is not.
 
-### Attention kernels and the driver timeout
+### torch SDPA resets the display driver
 
-Windows resets a GPU that has not finished a single kernel within `TdrDelay`, which is **2 seconds** unless someone set it. The reset shows up as event 4101, a black screen that recovers, or an outright hang.
+`torch.nn.functional.scaled_dot_product_attention` resets the display driver on this setup. The reset shows up as event 4101, a black screen that recovers, or a hang that needs the power button.
 
-On an RX 6950 XT under ZLUDA, one unsplit fp16 SDPA call over a 4096-token sequence (`1x8x4096x64`) takes about 1.5 seconds. That sits right on the limit, so some calls cross it and the driver resets. Measured by isolating one operation per process, with the machine otherwise idle:
+Measured on an RX 6950 XT with ZLUDA 3.9.5, HIP 6.4 and torch 2.7.0+cu118, one operation per process, machine otherwise idle:
 
 | Operation | Result |
 |---|---|
 | `matmul` 1024x1024 fp16 | fine |
+| `matmul` 256x256 fp16 | fine |
 | `conv2d` 320->320 at 128x128, cuDNN off, 20x | fine |
 | `conv2d` 320->320 at 128x128, **cuDNN on**, 20x | fine, 0.019s per call |
-| **`SDPA` 1x8x4096x64 fp16, 10x** | **driver reset, every time** |
+| **`SDPA` 1x8x4096x64 fp16, 10x** | **driver reset** |
+| **`SDPA` 1x8x256x64 fp16, 10x** | **driver reset** |
 
-This is why ComfyUI-Zluda setups run a split attention mode such as `--use-quad-cross-attention`: it breaks attention into chunks so no single kernel approaches the timeout. If you see 4101 during generation, that flag is the first thing to check, not the model and not your VRAM.
+Every run that called SDPA reset the driver; every run that did not was fine. Sequence length makes no difference, so this is not a kernel running past the `TdrDelay` timeout, which is 2 seconds by default: the small case finishes in milliseconds and still takes the driver down. Something in that code path is simply broken here.
 
-Raising `TdrDelay` hides the symptom rather than fixing it, and a genuinely hung GPU then takes the whole machine down instead of recovering. Split the attention instead.
+This is what split attention is protecting you from. `--use-quad-cross-attention` computes attention as chunked matmuls and never enters the SDPA path, which is why a normally configured ComfyUI runs fine on this card while a bare `torch` script does not. **If you see 4101 during generation, check that flag first**, ahead of the model and your VRAM.
 
-`Test-Setup.ps1` keeps its SDPA check deliberately small for the same reason. A self-test that resets your display driver is not a useful self-test.
+Raising `TdrDelay` does not help, because the timeout is not what is being hit.
+
+`Test-Setup.ps1` therefore checks attention as chunked matmuls rather than calling SDPA. A self-test that resets your display driver is worse than no self-test.
+
+If SDPA works on your gfx1030 card, please say so in an issue; it would be useful to know whether this is specific to one driver or ZLUDA build.
 
 ### HIP SDK installed, but `bin` has no `amdhip64.dll`
 

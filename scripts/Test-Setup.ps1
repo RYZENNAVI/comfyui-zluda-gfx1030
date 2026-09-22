@@ -4,10 +4,14 @@ Run real work on the GPU from the ComfyUI venv to prove the setup works.
 
 .DESCRIPTION
 Check-Environment.ps1 only inspects files and environment variables. This one
-actually dispatches to the GPU:
+dispatches real work to the GPU to prove the plumbing carries it:
   - matmul        goes through rocBLAS
-  - convolution   fails here when cuDNN was not properly disabled
-  - attention     goes through SDPA
+  - convolution   the VAE and UNet path
+  - attention     as chunked matmuls, the way split attention runs it
+
+It deliberately exercises only what ComfyUI itself runs. It is a check that the
+setup works, not a stability survey of your card, and it does not poke at code
+paths a working ComfyUI never enters.
 
 The first run is slow because ZLUDA JIT-compiles kernels, cached under
 %LOCALAPPDATA%\ZLUDA\ComputeCache. Later runs are fast.
@@ -93,32 +97,25 @@ except Exception as e:
     fail.append(("conv2d fp16", e))
     print("conv2d fp16  FAILED:", e)
 
-# attention. Keep this small on purpose. A single SDPA call over a long sequence
-# runs for well over a second on this card, and Windows resets the display driver
-# at 2 seconds by default. 1x8x4096x64 reliably triggers that reset; this does not.
+# attention, chunked the way a split attention mode does it.
+# torch.nn.functional.scaled_dot_product_attention is deliberately not called
+# here: on this setup it resets the display driver, at any sequence length, and
+# a self-test that takes the screen down is worse than no self-test. ComfyUI
+# avoids it too, which is what --use-quad-cross-attention is for.
 try:
     q = torch.randn(1, 8, 256, 64, device="cuda", dtype=torch.float16)
-    torch.nn.functional.scaled_dot_product_attention(q, q, q)
-    print("sdpa fp16    OK")
-except Exception as e:
-    fail.append(("sdpa fp16", e))
-    print("sdpa fp16    FAILED:", e)
-
-# Informational. ComfyUI-Zluda disables cuDNN for everyone, on the grounds that
-# RDNA2 has no working engine under ZLUDA. On an RX 6950 XT with ZLUDA 3.9.5,
-# HIP 6.4 and torch 2.7.0+cu118 this passes anyway. Either result is fine; it is
-# reported so people can say what their own card does.
-try:
-    torch.backends.cudnn.enabled = True
-    x = torch.randn(1, 320, 128, 128, device="cuda", dtype=torch.float16)
-    w = torch.randn(320, 320, 3, 3, device="cuda", dtype=torch.float16)
-    torch.nn.functional.conv2d(x, w, padding=1)
+    scale = q.shape[-1] ** -0.5
+    out = torch.empty_like(q)
+    step = 64
+    for i in range(0, q.shape[2], step):
+        s = (q[:, :, i:i + step] @ q.transpose(-2, -1)) * scale
+        out[:, :, i:i + step] = s.softmax(dim=-1) @ q
     torch.cuda.synchronize()
-    print("conv2d cudnn on   works here (informational, not required)")
+    assert out.shape == q.shape, out.shape
+    print("attention fp16  OK (chunked)")
 except Exception as e:
-    print("conv2d cudnn on   fails here (informational, expected):", e)
-finally:
-    torch.backends.cudnn.enabled = False
+    fail.append(("attention fp16", e))
+    print("attention fp16  FAILED:", e)
 
 print()
 rc = 0
