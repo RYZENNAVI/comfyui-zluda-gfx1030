@@ -71,6 +71,18 @@ Raising `TdrDelay` does not help, because the timeout is not what is being hit.
 
 If SDPA works on your gfx1030 card, please say so in an issue; it would be useful to know whether this is specific to one driver or ZLUDA build.
 
+#### Measuring this yourself, without fooling yourself
+
+The table above took three wrong conclusions and three forced reboots to produce. The mistakes are easy to repeat:
+
+- **One operation per process.** A process that runs several operations and then resets the driver tells you nothing about which one did it.
+- **Establish a baseline first.** Run the operations you do not suspect, on their own, and confirm they are clean. If they are not, you are chasing something else.
+- **Wait at least ten seconds before reading the event log.** Event 4101 is written about a second after the reset, so a query that fires immediately reports "clean" and sends you off building a theory on a false negative. Print the start and end time of each probe and line them up against the 4101 timestamps; the reset lands a second after the process ends.
+- **Leave the machine alone while testing.** Viewing an image or playing a video is enough GPU work to confound the result.
+- **The exit path is not the variable.** `os._exit` skipping CUDA context teardown looks like an obvious suspect and is not one: a clean exit resets the driver just the same, and a force-kill does not reset it when no SDPA was involved. Do not spend a round on it.
+
+A reset recovers on its own more often than not, but two of the three here hung hard enough to need the power button. Save your work first.
+
 ### HIP SDK installed, but `bin` has no `amdhip64.dll`
 
 The installer sometimes skips the core runtime, leaving `bin` without the one DLL that matters.
