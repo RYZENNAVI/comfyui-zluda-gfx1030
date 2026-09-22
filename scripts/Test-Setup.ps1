@@ -145,7 +145,10 @@ $env:PYTHONIOENCODING = 'utf-8'
 Write-Host "Running the self-test in $root (the first run is slow while ZLUDA JIT-compiles kernels)..."
 Write-Host ""
 
-$p = Start-Process -FilePath $zexe -ArgumentList @('--', $py, $tmp) `
+# Quote each path: Start-Process joins ArgumentList with spaces and quotes
+# nothing, so an install under a path like "C:\My Stuff\ComfyUI" would arrive
+# at python split in two.
+$p = Start-Process -FilePath $zexe -ArgumentList @('--', "`"$py`"", "`"$tmp`"") `
     -WorkingDirectory $root -NoNewWindow -PassThru `
     -RedirectStandardOutput $log -RedirectStandardError "$log.err"
 
