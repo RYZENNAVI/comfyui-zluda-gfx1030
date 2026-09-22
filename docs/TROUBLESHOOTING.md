@@ -35,6 +35,14 @@ Note that `comfy\customzluda\zluda.py` is a third file. It is not the default, a
 
 `zluda-default.py` also turns off `flash_sdp` and `mem_efficient_sdp` and forces `math_sdp` on. Leave that alone; the other SDPA backends have no working path here.
 
+### Does cuDNN actually crash on gfx1030?
+
+Not on the configuration this project was built against. On an RX 6950 XT with ZLUDA 3.9.5, HIP 6.4 and torch 2.7.0+cu118, `torch.backends.cudnn.is_available()` returns true, reports version 9.1.0, and fp16 convolutions run correctly with cuDNN **enabled** at tiny, VAE and UNet sizes alike.
+
+That is worth knowing, but it does not make the setting yours to choose: ComfyUI-Zluda disables cuDNN on import for every ZLUDA user, so that is how ComfyUI runs regardless. `Test-Setup.ps1` tests the configuration that ships, then reports the cuDNN-enabled result separately as information. If your card fails that informational line, say so in an issue.
+
+Note that `torch\lib` keeps NVIDIA's own `cudnn64_9.dll` and friends. The ZLUDA `cudnn.dll` is not copied over them, the same way `cublasLt.dll` is not.
+
 ### HIP SDK installed, but `bin` has no `amdhip64.dll`
 
 The installer sometimes skips the core runtime, leaving `bin` without the one DLL that matters.

@@ -62,7 +62,12 @@ print("cuda avail  ", torch.cuda.is_available())
 if not torch.cuda.is_available():
     sys.exit("torch cannot see the GPU, stopping here.")
 print("device      ", torch.cuda.get_device_name(0))
-print("cudnn       ", torch.backends.cudnn.enabled)
+
+# ComfyUI runs with cuDNN off, because comfy\zluda.py turns it off on import.
+# A bare interpreter does not, so set it here or this would test a different
+# configuration from the one that matters.
+torch.backends.cudnn.enabled = False
+print("cudnn       ", torch.backends.cudnn.enabled, "(forced off, the way ComfyUI runs)")
 print()
 
 fail = []
@@ -97,6 +102,22 @@ except Exception as e:
     fail.append(("sdpa fp16", e))
     print("sdpa fp16    FAILED:", e)
 
+# Informational. ComfyUI-Zluda disables cuDNN for everyone, on the grounds that
+# RDNA2 has no working engine under ZLUDA. On an RX 6950 XT with ZLUDA 3.9.5,
+# HIP 6.4 and torch 2.7.0+cu118 this passes anyway. Either result is fine; it is
+# reported so people can say what their own card does.
+try:
+    torch.backends.cudnn.enabled = True
+    x = torch.randn(1, 320, 128, 128, device="cuda", dtype=torch.float16)
+    w = torch.randn(320, 320, 3, 3, device="cuda", dtype=torch.float16)
+    torch.nn.functional.conv2d(x, w, padding=1)
+    torch.cuda.synchronize()
+    print("conv2d cudnn on   works here (informational, not required)")
+except Exception as e:
+    print("conv2d cudnn on   fails here (informational, expected):", e)
+finally:
+    torch.backends.cudnn.enabled = False
+
 print()
 rc = 0
 if fail:
@@ -114,8 +135,6 @@ $tmp = Join-Path $env:TEMP "gfx1030-selftest-$PID.py"
 $log = Join-Path $env:TEMP "gfx1030-selftest-$PID.log"
 Set-Content -Path $tmp -Value $code -Encoding UTF8
 
-# Match how comfyui.bat launches, otherwise this tests a different environment.
-$env:TORCH_BACKENDS_CUDNN_ENABLED = '0'
 $env:PYTHONIOENCODING = 'utf-8'
 
 Write-Host "Running the self-test in $root (the first run is slow while ZLUDA JIT-compiles kernels)..."
