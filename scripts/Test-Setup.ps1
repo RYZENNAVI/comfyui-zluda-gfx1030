@@ -7,11 +7,13 @@ Check-Environment.ps1 only inspects files and environment variables. This one
 dispatches real work to the GPU to prove the plumbing carries it:
   - matmul        goes through rocBLAS
   - convolution   the VAE and UNet path
-  - attention     as chunked matmuls, the way split attention runs it
+  - attention     SDPA, with the backends pinned the way ComfyUI pins them
 
-It deliberately exercises only what ComfyUI itself runs. It is a check that the
-setup works, not a stability survey of your card, and it does not poke at code
-paths a working ComfyUI never enters.
+It deliberately exercises only what ComfyUI itself runs, in the configuration
+ComfyUI runs it in. It is a check that the setup works, not a stability survey
+of your card, and it does not poke at code paths a working ComfyUI never enters.
+That matters for attention in particular: called with the default backends,
+SDPA resets the display driver on this hardware.
 
 The first run is slow because ZLUDA JIT-compiles kernels, cached under
 %LOCALAPPDATA%\ZLUDA\ComputeCache. Later runs are fast.
@@ -50,8 +52,11 @@ if (-not (Test-Path $zexe)) { throw "No zluda.exe in $zdir." }
 
 # Sharing the GPU with a running ComfyUI gives confusing out-of-memory failures.
 # Report it and stop; never kill a process this script did not start.
+# Match on the script being run, not just on the interpreter's location: other
+# things use that venv, and a stray one should not look like a running ComfyUI.
 $busy = @(Get-CimInstance Win32_Process -Filter "Name='python.exe'" -ErrorAction SilentlyContinue |
-          Where-Object { $_.ExecutablePath -and $_.ExecutablePath.StartsWith($root, 'OrdinalIgnoreCase') })
+          Where-Object { $_.ExecutablePath -and $_.ExecutablePath.StartsWith($root, 'OrdinalIgnoreCase') -and
+                         $_.CommandLine -match '\bmain\.py\b' })
 if ($busy.Count -gt 0 -and -not $Force) {
     Write-Host "ComfyUI looks like it is running (PID $($busy[0].ProcessId))." -ForegroundColor Yellow
     Write-Host "Close it first so the two do not fight over VRAM, or pass -Force." -ForegroundColor Yellow
@@ -72,6 +77,15 @@ print("device      ", torch.cuda.get_device_name(0))
 # configuration from the one that matters.
 torch.backends.cudnn.enabled = False
 print("cudnn       ", torch.backends.cudnn.enabled, "(forced off, the way ComfyUI runs)")
+
+# Same for the attention backends. The mem-efficient one resets the display
+# driver here: its CUTLASS kernel is built for the wrong SM version, so one call
+# floods "is for sm80-sm100, but was built for sm37" and takes the driver with
+# it. ComfyUI turns it off on import; a bare interpreter leaves it on.
+torch.backends.cuda.enable_flash_sdp(False)
+torch.backends.cuda.enable_math_sdp(True)
+torch.backends.cuda.enable_mem_efficient_sdp(False)
+print("sdp backend  math only, mem-efficient off")
 print()
 
 fail = []
@@ -97,25 +111,17 @@ except Exception as e:
     fail.append(("conv2d fp16", e))
     print("conv2d fp16  FAILED:", e)
 
-# attention, chunked the way a split attention mode does it.
-# torch.nn.functional.scaled_dot_product_attention is deliberately not called
-# here: on this setup it resets the display driver, at any sequence length, and
-# a self-test that takes the screen down is worse than no self-test. ComfyUI
-# avoids it too, which is what --use-quad-cross-attention is for.
+# attention, through the real entry point, safe now that the backend is pinned.
+# The first run can sit here for minutes while ZLUDA compiles the math kernels.
+# That is compilation, not a hang.
 try:
     q = torch.randn(1, 8, 256, 64, device="cuda", dtype=torch.float16)
-    scale = q.shape[-1] ** -0.5
-    out = torch.empty_like(q)
-    step = 64
-    for i in range(0, q.shape[2], step):
-        s = (q[:, :, i:i + step] @ q.transpose(-2, -1)) * scale
-        out[:, :, i:i + step] = s.softmax(dim=-1) @ q
+    torch.nn.functional.scaled_dot_product_attention(q, q, q)
     torch.cuda.synchronize()
-    assert out.shape == q.shape, out.shape
-    print("attention fp16  OK (chunked)")
+    print("sdpa fp16    OK (math backend)")
 except Exception as e:
-    fail.append(("attention fp16", e))
-    print("attention fp16  FAILED:", e)
+    fail.append(("sdpa fp16", e))
+    print("sdpa fp16    FAILED:", e)
 
 print()
 rc = 0
