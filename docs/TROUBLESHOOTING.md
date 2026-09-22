@@ -10,13 +10,14 @@ Look up what you are seeing. For most problems `scripts\Check-Environment.ps1` p
 | Exit code `0xC0000139`<br>(STATUS_ENTRYPOINT_NOT_FOUND) | The DLL was found, but it does not export what was asked for | Still a version mix. Check whether a different version of `amdhip64*.dll` is being loaded first from PATH |
 | `WinError 126: the specified module could not be found`<br>(on `import torch`) | Python 3.8+ **no longer searches PATH** for extension-module DLL dependencies | The DLLs must go directly into `venv\Lib\site-packages\torch\lib`. Editing PATH does nothing at all |
 | `AttributeError: module 'comfy_kitchen' has no attribute 'int8_attention_is_available'` | That function does not exist under ZLUDA | `scripts\Patch-ComfyUI.ps1` |
-| Access violation during convolution, or the process dies silently | RDNA2 has no cuDNN engine under ZLUDA | `scripts\Patch-ComfyUI.ps1`. If you patched `comfy\zluda.py` by hand, read "The launcher overwrites your patch" below |
+| Access violation during convolution, or the process dies silently | Not cuDNN, despite what older guides say. Look at the attention rows below first | Read "cuDNN is not the problem it is said to be" |
 | A fix you made to `comfy\zluda.py` has no effect | `comfyui.bat` regenerates that file on every launch | Edit `comfy\customzluda\zluda-default.py` instead |
 | torch imports, but any CUDA call fails after replacing DLLs | `cublasLt64_11.dll` was overwritten with the ZLUDA `cublasLt.dll` | Only four DLLs get replaced. Reinstall torch to restore it |
 | Access violation while loading a large model | The safetensors mmap path faults under memory pressure | Add `--disable-mmap` to the launch arguments |
 | Out-of-memory part-way through a generation | Async offload or pinned memory | Launch with `--disable-async-offload --disable-pinned-memory` |
 | The first generation hangs for ten minutes or more | Expected. ZLUDA is JIT-compiling kernels | Wait. They are cached in `%LOCALAPPDATA%\ZLUDA\ComputeCache` and later runs are fast |
-| The screen goes black and recovers, event 4101 "display driver stopped responding", sometimes a hard hang | Something called torch SDPA, which resets the driver on this setup | Use split attention, for example `--use-quad-cross-attention`. See "torch SDPA resets the display driver" below |
+| The screen goes black and recovers, event 4101 "display driver stopped responding", sometimes a hard hang | Something called SDPA with the mem-efficient backend left enabled | Disable that backend, the way `zluda-default.py` does. See "The mem-efficient attention backend resets the display driver" below |
+| `FATAL: kernel ... is for sm80-sm100, but was built for sm37`, repeated endlessly | Same thing: the mem-efficient CUTLASS kernel | Same as above |
 | `no kernel image is available for execution` | Unexpected on gfx1030, which ships with kernels. The HIP install is stripped or broken | Reinstall the HIP SDK. Do not go looking for kernel packs; this card does not need them |
 | HIP is installed but behaves as if it is not | Several versions installed with the wrong PATH order, or a user-scope environment variable shadowing the machine scope | See "Several HIP versions side by side" below |
 
@@ -34,42 +35,75 @@ copy comfy\customzluda\zluda-default.py comfy\zluda.py /y
 
 Note that `comfy\customzluda\zluda.py` is a third file. It is not the default, and it treats cuDNN differently: it reads `TORCH_BACKENDS_CUDNN_ENABLED` and **defaults to enabled**. If you switch to it, set that variable to `0`.
 
-`zluda-default.py` also turns off `flash_sdp` and `mem_efficient_sdp` and forces `math_sdp` on. Leave that alone; the other SDPA backends have no working path here.
+`zluda-default.py` also turns off `flash_sdp` and `mem_efficient_sdp` and forces `math_sdp` on. **Leave that alone.** The `mem_efficient_sdp(False)` line is the one holding your display driver up; see the attention section below.
 
-### Does cuDNN actually crash on gfx1030?
+### cuDNN is not the problem it is said to be
 
-Not on the configuration this project was built against. On an RX 6950 XT with ZLUDA 3.9.5, HIP 6.4 and torch 2.7.0+cu118, `torch.backends.cudnn.is_available()` returns true, reports version 9.1.0, and fp16 convolutions run correctly with cuDNN **enabled** at tiny, VAE and UNet sizes alike.
+Guides for RDNA2 under ZLUDA, including an earlier version of this one, say that RDNA2 has no cuDNN engine and that convolutions crash unless cuDNN is disabled. Measured on both architectures, that does not hold:
 
-That was re-measured with one operation per process on an otherwise idle machine, after an earlier round of testing had been confounded by other GPU work: 20 convolutions at 320->320 with cuDNN on took 0.019s each and left the driver alone. The driver resets seen during that earlier round came from attention, not convolution.
+| | gfx1030 (RX 6950 XT) | gfx1031 (RX 6700 XT) |
+|---|---|---|
+| `cudnn.is_available()` | True, version 9.1.0 | True, version 9.1.0 |
+| 20x conv 320->320 at 128x128, cuDNN **on** | fine, 0.019s each | fine, 0.0147s each |
 
-That is worth knowing, but it does not make the setting yours to choose: ComfyUI-Zluda disables cuDNN on import for every ZLUDA user, so that is how ComfyUI runs regardless. `Test-Setup.ps1` tests the configuration that ships, then reports the cuDNN-enabled result separately as information. If your card fails that informational line, say so in an issue.
+One operation per process, machine otherwise idle, both times. The driver resets that got blamed on cuDNN came from attention.
+
+This is not an architecture difference, so do not go looking for one. The claim appears to be a leftover from older drivers or older ZLUDA builds.
+
+`zluda-default.py` disables cuDNN anyway, so that is how ComfyUI runs whatever you conclude here. Leave it; the setting costs nothing. What actually needs guarding is `enable_mem_efficient_sdp(False)` in the same block.
 
 Note that `torch\lib` keeps NVIDIA's own `cudnn64_9.dll` and friends. The ZLUDA `cudnn.dll` is not copied over them, the same way `cublasLt.dll` is not.
 
-### torch SDPA resets the display driver
+### The mem-efficient attention backend resets the display driver
 
-`torch.nn.functional.scaled_dot_product_attention` resets the display driver on this setup. The reset shows up as event 4101, a black screen that recovers, or a hang that needs the power button.
+A single `torch.nn.functional.scaled_dot_product_attention` call on a default `torch` configuration resets the display driver. The reset shows up as event 4101: a black screen that recovers, or a hang that needs the power button.
 
-Measured on an RX 6950 XT with ZLUDA 3.9.5, HIP 6.4 and torch 2.7.0+cu118, one operation per process, machine otherwise idle:
+The cause is visible on stdout, tens of thousands of times over:
+
+```
+FATAL: kernel `fmha_cutlassF_f16_aligned_64x64_rf_sm80` is for sm80-sm100, but was built for sm37
+```
+
+`fmha_cutlassF` is the CUTLASS kernel behind the **mem-efficient** SDPA backend. The SM version it was built for does not match what it is asked to run on, and the flood of failures takes the driver with it.
+
+Two things narrow this down further. First, the flash backend is never involved: torch rules it out before dispatch. Second, the math backend is pure torch operations and touches no CUTLASS kernel. You can confirm both on your own machine without calling SDPA at all, which means without risking the driver:
+
+```python
+import torch
+from torch.backends.cuda import SDPAParams, can_use_flash_attention, can_use_efficient_attention
+q = torch.randn(1, 8, 256, 64, device="cuda", dtype=torch.float16)
+p = SDPAParams(q, q, q, None, 0.0, False, False)
+print(torch.cuda.get_device_capability(0))      # (8, 8)
+print(can_use_flash_attention(p, False))        # False - never selected
+print(can_use_efficient_attention(p, False))    # True  - this is the broken one
+```
+
+So the rule is narrow: **disable the mem-efficient backend and SDPA is fine.** That is exactly what `zluda-default.py` already does for you:
+
+```python
+torch.backends.cuda.enable_flash_sdp(False)
+torch.backends.cuda.enable_math_sdp(True)
+torch.backends.cuda.enable_mem_efficient_sdp(False)
+```
+
+A normally launched ComfyUI is therefore safe. What is not safe is any script that imports torch directly and calls SDPA without repeating those lines, which includes a naively written self-test.
+
+Measured one operation per process, machine otherwise idle:
 
 | Operation | Result |
 |---|---|
-| `matmul` 1024x1024 fp16 | fine |
-| `matmul` 256x256 fp16 | fine |
+| `matmul` 1024x1024 fp16, and 256x256 | fine |
 | `conv2d` 320->320 at 128x128, cuDNN off, 20x | fine |
 | `conv2d` 320->320 at 128x128, **cuDNN on**, 20x | fine, 0.019s per call |
-| **`SDPA` 1x8x4096x64 fp16, 10x** | **driver reset** |
-| **`SDPA` 1x8x256x64 fp16, 10x** | **driver reset** |
+| `SDPA` 1x8x256x64, **mem-efficient disabled** | fine |
+| **`SDPA` 1x8x256x64, default backends** | **driver reset** |
+| **`SDPA` 1x8x4096x64, default backends** | **driver reset** |
 
-Every run that called SDPA reset the driver; every run that did not was fine. Sequence length makes no difference, so this is not a kernel running past the `TdrDelay` timeout, which is 2 seconds by default: the small case finishes in milliseconds and still takes the driver down. Something in that code path is simply broken here.
+Sequence length makes no difference, so this is not a kernel running past the `TdrDelay` timeout, which is 2 seconds by default: the small case finishes in milliseconds and still takes the driver down. Raising `TdrDelay` does not help.
 
-This is what split attention is protecting you from. `--use-quad-cross-attention` computes attention as chunked matmuls and never enters the SDPA path, which is why a normally configured ComfyUI runs fine on this card while a bare `torch` script does not. **If you see 4101 during generation, check that flag first**, ahead of the model and your VRAM.
+The first SDPA call on the math backend can take minutes while ZLUDA JIT-compiles it. That is the normal first-run compile, not a hang.
 
-Raising `TdrDelay` does not help, because the timeout is not what is being hit.
-
-`Test-Setup.ps1` therefore checks attention as chunked matmuls rather than calling SDPA. A self-test that resets your display driver is worse than no self-test.
-
-If SDPA works on your gfx1030 card, please say so in an issue; it would be useful to know whether this is specific to one driver or ZLUDA build.
+**How bad the reset is depends on the architecture.** On gfx1031 the driver recovers on its own: the screen blinks, the event log says "successfully recovered", and the session carries on. On gfx1030 two of three resets hung hard enough to need the power button. Same trigger, same kernel error, worse consequences here.
 
 #### Measuring this yourself, without fooling yourself
 

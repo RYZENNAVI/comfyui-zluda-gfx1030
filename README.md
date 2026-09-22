@@ -13,7 +13,7 @@ What actually breaks on this card is the ZLUDA plumbing, and every failure comes
 1. **ZLUDA and HIP major versions must match exactly.** ZLUDA's `nvcuda.dll` hardcodes `amdhip64_6.dll` or `amdhip64_7.dll` in its import table. A mismatch gives you a bare `0xC0000135` and nothing else to go on.
 2. **Python 3.8+ no longer searches PATH** for extension-module DLL dependencies. The ZLUDA DLLs have to sit in `venv\Lib\site-packages\torch\lib` under the names torch asks for. Editing PATH does nothing.
 3. **ComfyUI-Zluda disables cuDNN on every ZLUDA setup**, on the grounds that RDNA2 has no working engine. Measured on an RX 6950 XT, convolutions actually survive cuDNN being left on, so this may cost you nothing here - but the launcher decides, not you, and the scripts keep it consistent.
-4. **torch SDPA resets the display driver**, at any sequence length, including sizes that finish in milliseconds. That is what split attention modes like `--use-quad-cross-attention` are protecting you from: they never enter that code path. Worth knowing before you blame your model or your VRAM.
+4. **The mem-efficient attention backend resets the display driver.** Its CUTLASS kernel is built for an SM version that does not match, so a single SDPA call floods `FATAL: kernel ... is for sm80-sm100, but was built for sm37` and takes the driver down. ComfyUI-Zluda disables that backend for you; the danger is in scripts that call `torch.nn.functional.scaled_dot_product_attention` without doing the same.
 5. **The launcher overwrites the file you just patched.** `comfyui.bat` copies `comfy\customzluda\zluda-default.py` over `comfy\zluda.py` on every launch, and `comfy\model_management.py` imports `comfy.zluda`. Edit the default, not the copy.
 
 ## Usage

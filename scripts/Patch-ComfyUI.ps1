@@ -8,9 +8,10 @@ Apply the ComfyUI-side changes that gfx1030 + ZLUDA needs.
    raises AttributeError during startup.
 
 2. comfy\customzluda\zluda-default.py
-   RDNA2 has no cuDNN engine under ZLUDA, so convolutions have to run native.
-   This is the file to edit, not comfy\zluda.py: comfyui.bat copies the default
-   over comfy\zluda.py on every launch, so edits there are silently discarded.
+   The mem-efficient attention backend resets the display driver: its CUTLASS
+   kernel is built for the wrong SM version. This is the file to edit, not
+   comfy\zluda.py: comfyui.bat copies the default over comfy\zluda.py on every
+   launch, so edits there are silently discarded.
 
 3. comfyui.bat
    --disable-async-offload and --disable-pinned-memory are known to break ZLUDA
@@ -76,15 +77,17 @@ if (-not (Test-Path $target)) {
 } else {
     $name = Split-Path $target -Leaf
     $zt = Get-Content $target -Raw
-    if ($zt -match 'torch\.backends\.cudnn\.enabled\s*=\s*False') {
-        Write-Host "  ${name}: already disables cuDNN." -ForegroundColor DarkGray
-    } elseif ($zt -match 'torch\.backends\.cudnn\.enabled\s*=') {
+    if ($zt -match 'enable_mem_efficient_sdp\(False\)') {
+        Write-Host "  ${name}: already disables the mem-efficient attention backend." -ForegroundColor DarkGray
+    } elseif ($zt -match 'enable_mem_efficient_sdp\(True\)') {
         Backup-Once $target
-        $zt = $zt -replace 'torch\.backends\.cudnn\.enabled\s*=[^\r\n]*', 'torch.backends.cudnn.enabled = False'
+        $zt = $zt -replace 'enable_mem_efficient_sdp\(True\)', 'enable_mem_efficient_sdp(False)'
         [IO.File]::WriteAllText($target, $zt, (New-Object Text.UTF8Encoding $false))
-        Write-Host "  ${name}: forced cuDNN off." -ForegroundColor Green
+        Write-Host "  ${name}: disabled the mem-efficient attention backend." -ForegroundColor Green
     } else {
-        Write-Host "  ${name}: no cuDNN assignment found, upstream may have changed. Skipping." -ForegroundColor Yellow
+        # Do not inject a call into a file whose shape is unknown; say so instead.
+        Write-Host "  ${name}: no enable_mem_efficient_sdp call found, upstream may have changed. Add this by hand:" -ForegroundColor Yellow
+        Write-Host "      torch.backends.cuda.enable_mem_efficient_sdp(False)" -ForegroundColor Yellow
     }
 
     # comfy\zluda.py is regenerated from the default on every launch, so keep it

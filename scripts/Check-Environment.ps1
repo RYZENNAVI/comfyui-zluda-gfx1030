@@ -188,10 +188,13 @@ if ($root) {
     $default = Join-Path $root 'comfy\customzluda\zluda-default.py'
     $active  = Join-Path $root 'comfy\zluda.py'
     if (Test-Path $default) {
-        if (Select-String -Path $default -Pattern 'torch\.backends\.cudnn\.enabled\s*=\s*False' -Quiet) {
-            Ok "zluda-default.py disables cuDNN."
+        # This is the line that keeps the display driver up. The mem-efficient
+        # backend's CUTLASS kernel is built for the wrong SM version, and one
+        # SDPA call through it resets the driver.
+        if (Select-String -Path $default -Pattern 'enable_mem_efficient_sdp\(False\)' -Quiet) {
+            Ok "zluda-default.py disables the mem-efficient attention backend."
         } else {
-            Bad "zluda-default.py does not disable cuDNN; RDNA2 has no cuDNN engine and convolutions will crash."
+            Bad "zluda-default.py does not disable the mem-efficient attention backend; attention will reset the display driver."
             Fix "Run scripts\Patch-ComfyUI.ps1"
         }
         if ((Test-Path $active) -and ((Get-FileHash $default).Hash -ne (Get-FileHash $active).Hash)) {
@@ -200,10 +203,10 @@ if ($root) {
         }
     } elseif (Test-Path $active) {
         # An install without the default file: the active module is the only one.
-        if (Select-String -Path $active -Pattern 'torch\.backends\.cudnn\.enabled\s*=\s*False' -Quiet) {
-            Ok "comfy\zluda.py disables cuDNN."
+        if (Select-String -Path $active -Pattern 'enable_mem_efficient_sdp\(False\)' -Quiet) {
+            Ok "comfy\zluda.py disables the mem-efficient attention backend."
         } else {
-            Bad "comfy\zluda.py does not disable cuDNN; convolutions will crash."
+            Bad "comfy\zluda.py does not disable the mem-efficient attention backend; attention will reset the display driver."
             Fix "Run scripts\Patch-ComfyUI.ps1"
         }
     }
